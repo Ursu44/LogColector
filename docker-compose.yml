@@ -1,0 +1,77 @@
+services:
+  application-logs:
+    image: application_logs-generator
+    container_name: application_logs_container
+    restart: unless-stopped
+    volumes:
+      - ./logs/application:/logs
+    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/application.log; sleep 1; done"]
+
+  access-logs:
+    image: access_logs-generator
+    container_name: access_logs_container
+    restart: unless-stopped
+    volumes:
+      - ./logs/access:/logs
+    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/access.log; sleep 1; done"]
+
+  network-logs:
+    image: network_logs-generator
+    container_name: network_logs_container
+    restart: unless-stopped
+    volumes:
+      - ./logs/network:/logs
+    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/network.log; sleep 1; done"]
+
+  security-logs:
+    image: security_logs-generator
+    container_name: security_logs_container
+    restart: unless-stopped
+    volumes:
+      - ./logs/security:/logs
+    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/security.log; sleep 1; done"]
+
+  server-logs:
+    image: server_logs-generator
+    container_name: server_logs_container
+    restart: unless-stopped
+    volumes:
+      - ./logs/server:/logs
+    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/server.log; sleep 1; done"]
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.2
+    container_name: fluent-bit
+    depends_on:
+      - application-logs
+      - access-logs
+      - network-logs
+      - security-logs
+      - server-logs
+      - kafka
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./logs:/logs:ro
+    command: ["fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+
