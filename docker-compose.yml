@@ -1,47 +1,63 @@
+version: "3.8"
+
+volumes:
+  shared-state:  # volum shared între toate generatoarele
+
 services:
   application-logs:
-    image: application_logs-generator
+    image: ghcr.io/ursu44/application_logs-generator:latest
     container_name: application_logs_container
     restart: unless-stopped
     volumes:
       - ./logs/application:/logs
-    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/application.log; sleep 1; done"]
+      - shared-state:/shared
+      - ./utils_shared.py:/app/utils.py  # suprascrie utils.py din imagine
+    command: ["sh", "-c", "echo '' > /logs/application.log && while true; do python /app/main.py >> /logs/application.log; sleep 1; done"]
 
   access-logs:
-    image: access_logs-generator
+    image: ghcr.io/ursu44/access_logs-generator:latest
     container_name: access_logs_container
     restart: unless-stopped
     volumes:
       - ./logs/access:/logs
-    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/access.log; sleep 1; done"]
+      - shared-state:/shared
+      - ./utils_shared.py:/app/utils.py
+    command: ["sh", "-c", "echo '' > /logs/access.log && while true; do python /app/main.py >> /logs/access.log; sleep 1; done"]
 
   network-logs:
-    image: network_logs-generator
+    image: ghcr.io/ursu44/network_logs-generator:latest
     container_name: network_logs_container
     restart: unless-stopped
     volumes:
       - ./logs/network:/logs
-    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/network.log; sleep 1; done"]
+      - shared-state:/shared
+      - ./utils_shared.py:/app/utils.py
+    command: ["sh", "-c", "echo '' > /logs/network.log && while true; do python /app/main.py >> /logs/network.log; sleep 1; done"]
 
   security-logs:
-    image: security_logs-generator
+    image: ghcr.io/ursu44/security_logs-generator:latest
     container_name: security_logs_container
     restart: unless-stopped
     volumes:
       - ./logs/security:/logs
-    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/security.log; sleep 1; done"]
+      - shared-state:/shared
+      - ./utils_shared.py:/app/utils.py
+    command: ["sh", "-c", "echo '' > /logs/security.log && while true; do python /app/main.py >> /logs/security.log; sleep 1; done"]
 
   server-logs:
-    image: server_logs-generator
+    image: ghcr.io/ursu44/server_logs-generator:latest
     container_name: server_logs_container
     restart: unless-stopped
     volumes:
       - ./logs/server:/logs
-    command: ["sh", "-c", "while true; do python /app/main.py >> /logs/server.log; sleep 1; done"]
+      - shared-state:/shared
+      - ./utils_shared.py:/app/utils.py
+    command: ["sh", "-c", "echo '' > /logs/server.log && while true; do python /app/main.py >> /logs/server.log; sleep 1; done"]
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.3
     container_name: zookeeper
+    restart: unless-stopped
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -49,29 +65,63 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.3
     container_name: kafka
+    restart: unless-stopped
     depends_on:
       - zookeeper
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 5s
+      retries: 20
     ports:
-      - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
   fluent-bit:
     image: fluent/fluent-bit:4.2.2
     container_name: fluent-bit
+    restart: unless-stopped
     depends_on:
-      - application-logs
-      - access-logs
-      - network-logs
-      - security-logs
-      - server-logs
       - kafka
     volumes:
       - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - ./logs:/logs:ro
     command: ["fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
 
+  log-normalizer:
+    image: ghcr.io/ursu44/log-normalizer:latest
+    container_name: log_normalizer
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./logs:/logs
+    command: ["sh", "-c", "python -u /app/main.py | tee -a /logs/log_normalizer.log"]
+
+  log-ml:
+    image: ghcr.io/ursu44/ml_logs:latest
+    container_name: ml-logs
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./logs:/logs
+    command: ["sh", "-c", "
+  until python -c \"import socket; s=socket.create_connection(('kafka',9092),timeout=5); s.close()\" 2>/dev/null; do
+    sleep 5;
+  done &&
+  echo 'Kafka gata! Pornesc main.py...' &&
+  KAFKA_BOOTSTRAP_SERVERS=kafka:9092 python -u /app/main.py | tee -a /logs/ml_logs.log
+"]
