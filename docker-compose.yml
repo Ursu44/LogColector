@@ -1,9 +1,11 @@
 version: "3.8"
 
 volumes:
-  shared-state:  # volum shared între toate generatoarele
+  shared-state:
+  postgres-data:
 
 services:
+
   application-logs:
     image: ghcr.io/ursu44/application_logs-generator:latest
     container_name: application_logs_container
@@ -11,7 +13,7 @@ services:
     volumes:
       - ./logs/application:/logs
       - shared-state:/shared
-      - ./utils_shared.py:/app/utils.py  # suprascrie utils.py din imagine
+      - ./utils_shared.py:/app/utils.py
     command: ["sh", "-c", "echo '' > /logs/application.log && while true; do python /app/main.py >> /logs/application.log; sleep 1; done"]
 
   access-logs:
@@ -54,6 +56,7 @@ services:
       - ./utils_shared.py:/app/utils.py
     command: ["sh", "-c", "echo '' > /logs/server.log && while true; do python /app/main.py >> /logs/server.log; sleep 1; done"]
 
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.3
     container_name: zookeeper
@@ -83,6 +86,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+
   fluent-bit:
     image: fluent/fluent-bit:4.2.2
     container_name: fluent-bit
@@ -93,6 +97,7 @@ services:
       - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
       - ./logs:/logs:ro
     command: ["fluent-bit", "-c", "/fluent-bit/etc/fluent-bit.conf"]
+
 
   log-normalizer:
     image: ghcr.io/ursu44/log-normalizer:latest
@@ -106,6 +111,7 @@ services:
     volumes:
       - ./logs:/logs
     command: ["sh", "-c", "python -u /app/main.py | tee -a /logs/log_normalizer.log"]
+
 
   log-ml:
     image: ghcr.io/ursu44/ml_logs:latest
@@ -122,6 +128,74 @@ services:
   until python -c \"import socket; s=socket.create_connection(('kafka',9092),timeout=5); s.close()\" 2>/dev/null; do
     sleep 5;
   done &&
-  echo 'Kafka gata! Pornesc main.py...' &&
+  echo 'Kafka gata! Pornesc ML Pipeline...' &&
   KAFKA_BOOTSTRAP_SERVERS=kafka:9092 python -u /app/main.py | tee -a /logs/ml_logs.log
 "]
+
+
+  timeline-reconstruction:
+    image: ghcr.io/ursu44/timeline-reconstruction:latest
+    container_name: timeline_reconstruction
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      log-ml:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./logs:/logs
+    command: ["sh", "-c", "
+  until python -c \"import socket; s=socket.create_connection(('kafka',9092),timeout=5); s.close()\" 2>/dev/null; do
+    sleep 5;
+  done &&
+  echo 'Kafka gata! Pornesc Timeline Reconstruction...' &&
+  KAFKA_BOOTSTRAP_SERVERS=kafka:9092 python -u main.py | tee -a /logs/timeline.log
+"]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: logs
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+
+  logs-backend:
+    image: ghcr.io/ursu44/logs-backend:latest
+    container_name: logs_backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/logs
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  logs-frontend:
+    image: ghcr.io/ursu44/logs-frontend:latest
+    container_name: logs_frontend
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    depends_on:
+      - logs-backend
